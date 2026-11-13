@@ -23,6 +23,7 @@ add_library(mb2020 STATIC
   core/src/net.cpp
   core/src/printer.cpp
   core/src/scan.cpp
+  core/src/pdf.cpp
   core/src/stb_impl.c)
 target_include_directories(mb2020 PUBLIC core/include PRIVATE third_party/stb)
 target_compile_definitions(mb2020 PRIVATE STBI_WINDOWS_UTF8 STBIW_WINDOWS_UTF8)
@@ -30,6 +31,8 @@ set_source_files_properties(core/src/stb_impl.c PROPERTIES COMPILE_OPTIONS "-w")
 target_link_libraries(mb2020 PUBLIC jbigkit)
 if(WIN32)
   target_link_libraries(mb2020 PUBLIC ws2_32 iphlpapi)
+else()
+  target_link_libraries(mb2020 PUBLIC ${CMAKE_DL_LIBS})
 endif()
 if(NOT MSVC)
   target_compile_options(mb2020 PRIVATE $<$<COMPILE_LANGUAGE:CXX>:-Wall -Wextra>)

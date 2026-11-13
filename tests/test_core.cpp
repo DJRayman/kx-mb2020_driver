@@ -1,6 +1,8 @@
 // SPDX-License-Identifier: GPL-2.0-or-later
 // Тесты ядра без железа: JBIG, формат задания печати, растр, MFPP, LPD и полный скан с эмулятором МФУ.
 #include <atomic>
+#include <cmath>
+#include <cstdlib>
 #include <cstdio>
 #include <cstring>
 #include <random>
@@ -11,6 +13,7 @@
 #include "mb2020/gdi_print.h"
 #include "mb2020/jbig_band.h"
 #include "mb2020/net.h"
+#include "mb2020/pdf.h"
 #include "mb2020/raster.h"
 #include "mb2020/scan.h"
 
@@ -282,6 +285,87 @@ static void test_scan_end_to_end() {
     CHECK(std::memcmp(r.image.data.data(), data.data() + 128, r.image.data.size()) == 0);
 }
 
+// Минимальный PDF: страница 1 — A4 с рамкой в 1 см и надписью; страница 2 — A4 альбомная с чёрным квадратом.
+static std::vector<uint8_t> make_test_pdf() {
+    std::vector<std::string> objs = {
+        "<< /Type /Catalog /Pages 2 0 R >>",
+        "<< /Type /Pages /Kids [3 0 R 6 0 R] /Count 2 >>",
+        "<< /Type /Page /Parent 2 0 R /MediaBox [0 0 595.276 841.89] /Contents 4 0 R /Resources << /Font << /F1 5 0 R >> >> >>",
+        "",  // поток 1
+        "<< /Type /Font /Subtype /Type1 /BaseFont /Helvetica >>",
+        "<< /Type /Page /Parent 2 0 R /MediaBox [0 0 841.89 595.276] /Contents 7 0 R >>",
+        "",  // поток 2
+    };
+    auto stream = [](const std::string& c) { return "<< /Length " + std::to_string(c.size()) + " >>\nstream\n" + c + "\nendstream"; };
+    objs[3] = stream("2 w 28.35 28.35 538.58 785.2 re S BT /F1 36 Tf 72 740 Td (PDF TEST) Tj ET");
+    objs[6] = stream("0 g 100 100 200 200 re f");
+    std::string out = "%PDF-1.4\n";
+    std::vector<size_t> off;
+    for (size_t i = 0; i < objs.size(); ++i) {
+        off.push_back(out.size());
+        out += std::to_string(i + 1) + " 0 obj\n" + objs[i] + "\nendobj\n";
+    }
+    size_t xref = out.size();
+    out += "xref\n0 " + std::to_string(objs.size() + 1) + "\n0000000000 65535 f \n";
+    char line[32];
+    for (size_t o : off) {
+        std::snprintf(line, sizeof line, "%010zu 00000 n \n", o);
+        out += line;
+    }
+    out += "trailer\n<< /Size " + std::to_string(objs.size() + 1) + " /Root 1 0 R >>\nstartxref\n" + std::to_string(xref) + "\n%%EOF\n";
+    return std::vector<uint8_t>(out.begin(), out.end());
+}
+
+// Нужна библиотека PDFium: путь в переменной MB2020_PDFIUM (иначе тест пропускается).
+static void test_pdf() {
+    const char* lib = std::getenv("MB2020_PDFIUM");
+    if (!lib) {
+        std::printf("pdf: пропущено (MB2020_PDFIUM не задан)\n");
+        return;
+    }
+    std::printf("pdf\n");
+    PdfDocument::load_library(lib);
+    PdfDocument doc(make_test_pdf());
+    CHECK(doc.page_count() == 2);
+    double w, h;
+    doc.page_size_pt(0, w, h);
+    CHECK(std::abs(w - 595.276) < 0.01 && std::abs(h - 841.89) < 0.01);
+
+    // A4 в натуральную величину: рамка в 1 см (236 пикс) от края листа = ~136 пикс от края печатаемой области
+    Image8 g = doc.render_a4_600(0, PdfRenderOptions{});
+    CHECK(g.width == kA4Width600 && g.height == kA4Height600 && g.channels == 1);
+    auto px = [&](int x, int y) { return g.data[size_t(y) * g.width + x]; };
+    int left = -1;
+    for (int x = 0; x < 400 && left < 0; ++x)
+        if (px(x, 3400) < 128) left = x;
+    int top = -1;
+    for (int y = 0; y < 400 && top < 0; ++y)
+        if (px(2380, y) < 128) top = y;
+    std::printf("  рамка: слева %d, сверху %d пикс от края печатаемой области\n", left, top);
+    CHECK(left >= 128 && left <= 140);
+    CHECK(top >= 128 && top <= 140);
+    size_t black = 0;  // текст «PDF TEST»
+    for (int y = 0; y < 500; ++y)
+        for (int x = 400; x < 2000; ++x) black += px(x, 300 + y) < 128;
+    CHECK(black > 5000);
+    Bitmap1 page = render_page(g, RasterOptions{});
+    CHECK(page.get(left + 2, 3400));
+
+    // Альбомная страница поворачивается; чёрный квадрат 200x200 pt -> ~1667x1667 пикс
+    Image8 g2 = doc.render_a4_600(1, PdfRenderOptions{});
+    size_t b2 = 0;
+    for (uint8_t v : g2.data) b2 += v < 128;
+    std::printf("  чёрных на альбомной странице: %zu\n", b2);
+    CHECK(b2 > 1600u * 1600u && b2 < 1700u * 1700u);
+    PdfRenderOptions fit;
+    fit.scale = PdfScale::Fit;
+    Image8 g3 = doc.render_a4_600(0, fit);
+    int left3 = -1;
+    for (int x = 0; x < 400 && left3 < 0; ++x)
+        if (g3.data[size_t(3400) * g3.width + x] < 128) left3 = x;
+    CHECK(left3 >= 0 && left3 < left);  // вписанная страница чуть меньше: рамка ближе к краю
+}
+
 int main() {
     try {
         test_jbig();
@@ -290,6 +374,7 @@ int main() {
         test_mfpp();
         test_lpd();
         test_scan_end_to_end();
+        test_pdf();
     } catch (const std::exception& e) {
         std::printf("НЕОЖИДАННОЕ ИСКЛЮЧЕНИЕ: %s\n", e.what());
         return 2;

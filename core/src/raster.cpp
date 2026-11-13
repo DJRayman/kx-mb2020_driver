@@ -93,7 +93,11 @@ Bitmap1 render_page(const Image8& src, const RasterOptions& opt) {
         dw = std::min(PW, std::max(1, int(std::lround(g.width * k))));
         dh = std::min(PH, std::max(1, int(std::lround(g.height * k))));
     }
-    std::vector<float> img = resample(g, dw, dh);
+    std::vector<float> img;
+    if (dw == g.width && dh == g.height)
+        img.assign(g.data.begin(), g.data.end());  // уже нужного размера (например, рендер PDF)
+    else
+        img = resample(g, dw, dh);
 
     Dither mode = opt.dither;
     if (mode == Dither::Auto) mode = looks_bilevel(g) ? Dither::Threshold : Dither::FloydSteinberg;

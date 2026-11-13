@@ -1,5 +1,6 @@
 // SPDX-License-Identifier: GPL-2.0-or-later
 // mbtool — консольная утилита печати и сканирования для Panasonic KX-MB2020 по сети.
+#include <cctype>
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
@@ -11,6 +12,7 @@
 
 #include "mb2020/gdi_print.h"
 #include "mb2020/net.h"
+#include "mb2020/pdf.h"
 #include "mb2020/printer.h"
 #include "mb2020/raster.h"
 #include "mb2020/scan.h"
@@ -32,7 +34,9 @@ void usage() {
     std::printf(
         "mbtool %s — печать и сканирование Panasonic KX-MB2020 по сети\n"
         "\n"
-        "  mbtool print [-p IP] [опции] ФАЙЛ...     напечатать картинки (PNG/JPEG/BMP/GIF/PNM), по странице на файл\n"
+        "  mbtool print [-p IP] [опции] ФАЙЛ...     напечатать PDF или картинки (PNG/JPEG/BMP/GIF/PNM)\n"
+        "      --pages 1-3,5                       только эти страницы PDF\n"
+        "      --fit | --actual                    PDF: вписать в лист / натуральная величина (по умолчанию: авто)\n"
         "      --dither auto|fs|threshold          способ перевода в ч/б (auto: текст — порог, фото — растр)\n"
         "      --actual-size DPI                   не масштабировать: картинка с разрешением DPI\n"
         "      --copies N                          копий (через PJL; проверено только 1)\n"
@@ -41,6 +45,7 @@ void usage() {
         "      --save-prn ФАЙЛ                     сохранить поток задания\n"
         "      --preview ФАЙЛ.png                  сохранить ч/б страницу, как она уйдёт на принтер\n"
         "      --dry-run                           ничего не отправлять на МФУ\n"
+        "      --pdfium ПУТЬ                       путь к pdfium.dll / libpdfium.so (по умолчанию рядом с mbtool)\n"
         "  mbtool scan [-p IP] [-o ФАЙЛ.png|.jpg]   отсканировать лист со стекла (A4, 300 dpi, цвет)\n"
         "      --timeout СЕК                       ожидание картинки (по умолчанию 180)\n"
         "      --pc-name ИМЯ                       имя ПК, которое увидит МФУ\n"
@@ -92,6 +97,35 @@ std::string basename_of(const std::string& p) {
     return s == std::string::npos ? p : p.substr(s + 1);
 }
 
+bool is_pdf(const std::string& p) {
+    if (p.size() < 4) return false;
+    std::string e = p.substr(p.size() - 4);
+    for (auto& c : e) c = char(std::tolower((unsigned char)c));
+    return e == ".pdf";
+}
+
+// "1-3,5" -> {0,1,2,4}; пусто -> все страницы
+std::vector<int> parse_pages(const std::string& spec, int n) {
+    std::vector<int> r;
+    if (spec.empty()) {
+        for (int i = 0; i < n; ++i) r.push_back(i);
+        return r;
+    }
+    size_t pos = 0;
+    while (pos < spec.size()) {
+        size_t comma = spec.find(',', pos);
+        std::string part = spec.substr(pos, comma == std::string::npos ? std::string::npos : comma - pos);
+        size_t dash = part.find('-');
+        int a = std::atoi(part.substr(0, dash).c_str());
+        int b = dash == std::string::npos ? a : (dash + 1 < part.size() ? std::atoi(part.substr(dash + 1).c_str()) : n);
+        if (a < 1 || b < a || b > n) throw std::runtime_error("неверный диапазон страниц: " + part + " (в документе " + std::to_string(n) + ")");
+        for (int i = a; i <= b; ++i) r.push_back(i - 1);
+        if (comma == std::string::npos) break;
+        pos = comma + 1;
+    }
+    return r;
+}
+
 std::string printer_from(const std::string& opt) {
     if (!opt.empty()) return opt;
     if (const char* e = std::getenv("MB2020_PRINTER")) return e;
@@ -119,8 +153,9 @@ struct Args {
 };
 
 int cmd_print(Args a) {
-    std::string printer, save_prn, preview, name;
+    std::string printer, save_prn, preview, name, pages_spec, pdfium_path;
     RasterOptions ro;
+    PdfRenderOptions pdf_opt;
     PrintJobInfo info;
     bool dry = false;
     std::vector<std::string> files;
@@ -139,6 +174,10 @@ int cmd_print(Args a) {
         else if (o == "--save-prn") save_prn = a.next(o);
         else if (o == "--preview") preview = a.next(o);
         else if (o == "--dry-run") dry = true;
+        else if (o == "--pages") pages_spec = a.next(o);
+        else if (o == "--fit") pdf_opt.scale = PdfScale::Fit;
+        else if (o == "--actual") pdf_opt.scale = PdfScale::Actual;
+        else if (o == "--pdfium") pdfium_path = a.next(o);
         else if (!o.empty() && o[0] == '-') throw std::runtime_error("неизвестная опция " + o);
         else files.push_back(o);
     }
@@ -151,27 +190,43 @@ int cmd_print(Args a) {
         net::init();
         info.pc_ip = ip_str(net::local_ip_towards(net::resolve(printer, kRawPrintPort)));
     }
-    for (size_t k = 0; k < files.size(); ++k) {
-        const std::string& f = files[k];
-        Image8 img = load_image(f, 1);
-        Bitmap1 page = render_page(img, ro);
-        info.name = name.empty() ? basename_of(f) : name;
+    size_t total = 0;
+    auto send_page = [&](const std::string& label, const Bitmap1& page) {
+        ++total;
+        info.name = name.empty() ? label : name;
         std::vector<uint8_t> job = build_gdi_job(page, info);
-        std::string suffix = files.size() > 1 ? "_" + std::to_string(k + 1) : "";
-        auto with_suffix = [&](const std::string& p) {
-            if (suffix.empty()) return p;
+        auto numbered = [&](const std::string& p) {
+            if (p.empty()) return p;
             size_t dot = p.find_last_of('.');
-            return dot == std::string::npos ? p + suffix : p.substr(0, dot) + suffix + p.substr(dot);
+            std::string sfx = "_" + std::to_string(total);
+            return dot == std::string::npos ? p + sfx : p.substr(0, dot) + sfx + p.substr(dot);
         };
-        if (!preview.empty()) save_bitmap1_png(with_suffix(preview), page);
-        if (!save_prn.empty()) write_file(with_suffix(save_prn), job);
+        if (!preview.empty()) save_bitmap1_png(numbered(preview), page);
+        if (!save_prn.empty()) write_file(numbered(save_prn), job);
         if (dry) {
-            std::printf("%s: задание %zu байт (не отправлено)\n", f.c_str(), job.size());
-            continue;
+            std::printf("%s: задание %zu байт (не отправлено)\n", label.c_str(), job.size());
+            return;
         }
-        std::printf("%s: отправляю на %s (%zu байт)…\n", f.c_str(), printer.c_str(), job.size());
+        std::printf("%s: отправляю на %s (%zu байт)…\n", label.c_str(), printer.c_str(), job.size());
         send_raw(printer, job);
         std::printf("  отправлено\n");
+    };
+    for (const std::string& f : files) {
+        if (is_pdf(f)) {
+            if (!pdfium_path.empty()) PdfDocument::load_library(pdfium_path);
+            PdfDocument doc(read_file(f));
+            const int n = doc.page_count();
+            std::vector<int> pages = parse_pages(pages_spec, n);
+            RasterOptions pro = ro;
+            if (pro.dither == Dither::Auto) pro.dither = Dither::FloydSteinberg;  // текст без сглаживания не пострадает
+            for (int idx : pages) {
+                std::printf("%s: страница %d из %d…\n", f.c_str(), idx + 1, n);
+                Image8 gray = doc.render_a4_600(idx, pdf_opt);
+                send_page(basename_of(f) + " [" + std::to_string(idx + 1) + "]", render_page(gray, pro));
+            }
+        } else {
+            send_page(basename_of(f), render_page(load_image(f, 1), ro));
+        }
     }
     return 0;
 }
