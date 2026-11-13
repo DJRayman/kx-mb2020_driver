@@ -13,3 +13,7 @@ out/
 *.dat
 *.png
 *.log
+
+# build directories
+build/
+build-*/

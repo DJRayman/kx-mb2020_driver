@@ -8,7 +8,8 @@
 |---|---|
 | Протокол сканирования (LAN) | разобран по захватам трафика, прототип на Windows получает скан A4/300 dpi/цвет и сохраняет PNG |
 | Протокол печати (GDI, TCP 9100) | разобран: PJL + ESC-команды + полосы JBIG-1 (T.82); свой поток собирается байт-в-байт как у драйвера Panasonic |
-| Отправка своего задания на печать | ещё не проверена на устройстве |
+| Отправка своего задания на печать | проверена на устройстве: страница, собранная своим кодом, напечаталась |
+| Ядро на C++ (`core/`) и утилита `mbtool` | печать картинок и скан в PNG/JPEG; тесты с эмулятором МФУ проходят; на железе ещё не проверено |
 | JBIG-1 кодер/декодер | готов (`proto/windows/Jbig1.cs`, на основе jbig-kit): перекодирование драйверного задания совпадает байт в байт |
 | Linux (SANE/CUPS) | не начато |
 
@@ -25,12 +26,41 @@
 
 RAW TCP 9100: `UEL` + PJL (`ENTER LANGUAGE=GDI`) → ESC-команды страницы (`ESC&r600W`, `ESC&l26A`, `ESC*r<H>T`, `ESC*r<W>S` …) → полосы `ESC*b0W` по 512 строк, каждая — JBIG-1 BIE (двухстрочный шаблон, TPBON) → `ESC&&1R` + `UEL @PJL EOJ`.
 
+## Утилита mbtool (Windows / Linux)
+
+```
+mbtool print -p 192.168.1.50 страница.png            # печать картинки на A4 (вписывается в лист)
+mbtool print -p 192.168.1.50 --dry-run --preview p.png страница.png   # посмотреть ч/б страницу без печати
+mbtool scan  -p 192.168.1.50 -o скан.png              # скан со стекла: A4, 300 dpi, цвет
+mbtool decode-prn задание.prn страница.png            # раскодировать поток печати
+mbtool setup                                          # Windows, от администратора: правило брандмауэра
+```
+
+IP МФУ можно задать переменной `MB2020_PRINTER`. Для скана на Windows порт TCP 3892 должен быть свободен
+(остановите службу «Panasonic Local Printer Service»), а mbtool — разрешён в брандмауэре (`mbtool setup`).
+
+Пока поддерживаются: только A4, печать 600 dpi, скан 300 dpi в цвете. PDF печатать пока нельзя — только картинки.
+
+### Сборка
+
+```
+cmake -S . -B build -G Ninja -DCMAKE_BUILD_TYPE=Release && cmake --build build && ./build/mb2020_tests
+# Windows из Linux (mingw-w64):
+cmake -S . -B build-win -G Ninja -DCMAKE_BUILD_TYPE=Release -DCMAKE_TOOLCHAIN_FILE=cmake/mingw-w64-x86_64.cmake
+cmake --build build-win
+```
+
 ## Структура
 
 ```
+core/                      переносимое ядро на C++17 (печать, скан, сеть, растр) — основа для Windows и Android
+tools/mbtool/              консольная утилита
+tests/                     тесты ядра (JBIG, формат задания, MFPP, LPD, скан с эмулятором МФУ)
+cmake/                     файл кросс-сборки под Windows
+third_party/stb/           stb_image / stb_image_write (public domain) — чтение и запись картинок
 docs/protocol-scan.md      протокол сканирования
 docs/protocol-print.md     протокол печати
-third_party/jbigkit/       исходники jbig-kit (справка, не собираются)
+third_party/jbigkit/       jbig-kit 1.6 (GPL) — JBIG-1 кодек ядра
 proto/windows/             прототипы (PowerShell + C#, только .NET Framework, без внешних библиотек)
   MfppScan.cs, mfpp_scan.ps1   скан по сети (UDP MFPP + свой LPD на TCP 3892 + PNG)
   Jbig1.cs                     JBIG-1 (T.82) кодер/декодер, на основе jbig-kit
@@ -53,4 +83,4 @@ proto/windows/             прототипы (PowerShell + C#, только .NE
 
 ## Лицензия
 
-GPL-2.0-or-later (см. [LICENSE](LICENSE)). JBIG-кодек (proto/windows/Jbig1.cs) основан на jbig-kit (Markus Kuhn), распространяемом под GNU GPL; исходники jbig-kit для справки лежат в [third_party/jbigkit](third_party/jbigkit).
+GPL-2.0-or-later (см. [LICENSE](LICENSE)). JBIG-кодек (proto/windows/Jbig1.cs) основан на jbig-kit (Markus Kuhn), распространяемом под GNU GPL; ядро на C++ использует сам jbig-kit из [third_party/jbigkit](third_party/jbigkit). stb_image и stb_image_write — public domain.
