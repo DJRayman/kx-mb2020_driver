@@ -1,0 +1,15 @@
+﻿bin/
+obj/
+out/
+*.user
+*.suo
+.vs/
+
+# capture data and results are not stored in the repo
+*.pcap
+*.pcapng
+*.etl
+*.prn
+*.dat
+*.png
+*.log
