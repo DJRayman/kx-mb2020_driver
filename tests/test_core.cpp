@@ -331,7 +331,8 @@ static void test_pdf() {
     doc.page_size_pt(0, w, h);
     CHECK(std::abs(w - 595.276) < 0.01 && std::abs(h - 841.89) < 0.01);
 
-    // A4 в натуральную величину: рамка в 1 см (236 пикс) от края листа = ~136 пикс от края печатаемой области
+    // A4 в натуральную величину: рамка в 1 см (236 пикс) от края листа = ~135 пикс от края печатаемой области,
+    // минус половина толщины линии 2 pt (~8 пикс) -> внешний край ~127 пикс
     Image8 g = doc.render_a4_600(0, PdfRenderOptions{});
     CHECK(g.width == kA4Width600 && g.height == kA4Height600 && g.channels == 1);
     auto px = [&](int x, int y) { return g.data[size_t(y) * g.width + x]; };
@@ -342,8 +343,8 @@ static void test_pdf() {
     for (int y = 0; y < 400 && top < 0; ++y)
         if (px(2380, y) < 128) top = y;
     std::printf("  рамка: слева %d, сверху %d пикс от края печатаемой области\n", left, top);
-    CHECK(left >= 128 && left <= 140);
-    CHECK(top >= 128 && top <= 140);
+    CHECK(left >= 122 && left <= 134);
+    CHECK(top >= 122 && top <= 134);
     size_t black = 0;  // текст «PDF TEST»
     for (int y = 0; y < 500; ++y)
         for (int x = 400; x < 2000; ++x) black += px(x, 300 + y) < 128;
@@ -363,7 +364,9 @@ static void test_pdf() {
     int left3 = -1;
     for (int x = 0; x < 400 && left3 < 0; ++x)
         if (g3.data[size_t(3400) * g3.width + x] < 128) left3 = x;
-    CHECK(left3 >= 0 && left3 < left);  // вписанная страница чуть меньше: рамка ближе к краю
+    // вписанная страница (масштаб ~0,96) начинается с края области, а не с -100 пикс: рамка ~219 пикс
+    std::printf("  рамка при --fit: слева %d\n", left3);
+    CHECK(left3 >= 210 && left3 <= 228);
 }
 
 int main() {
